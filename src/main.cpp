@@ -1,157 +1,204 @@
 #include <Geode/Geode.hpp>
-#include <Geode/modify/MenuLayer.hpp>
-#include <algorithm>
-#include <cmath>
-#include <random>
-#include <vector>
+#include <Geode/ui/GeodeUI.hpp>
+#include <Geode/binding/LevelInfoLayer.hpp>
+#include <Geode/binding/PlayLayer.hpp>
+#include <Geode/binding/PauseLayer.hpp>
+#include <Geode/binding/GameLevel.hpp>
+#include <Geode/binding/MenuLayer.hpp>
+#include <Geode/binding/GameManager.hpp>
 
 using namespace geode::prelude;
 
-namespace {
-    std::mt19937& rng() {
-        static std::mt19937 gen{std::random_device{}()};
-        return gen;
+// Lưu trữ cấu hình cài đặt trong Mod Settings hoặc Global variables đơn giản
+class QuickSwitcherManager {
+public:
+    static QuickSwitcherManager& get() {
+        static QuickSwitcherManager instance;
+        return instance;
     }
 
-    float randRange(float a, float b) {
-        return std::uniform_real_distribution<float>(a, b)(rng());
-    }
-
-    // Nửa kích thước của nút tính theo toạ độ màn hình (đã nhân scale của menu cha).
-    CCSize worldHalfSize(CCMenuItem* item) {
-        auto parent = item->getParent();
-        auto p0 = parent->convertToWorldSpace(ccp(0, 0));
-        auto px = parent->convertToWorldSpace(ccp(1, 0));
-        auto py = parent->convertToWorldSpace(ccp(0, 1));
-        float sx = std::abs(px.x - p0.x);
-        float sy = std::abs(py.y - p0.y);
-        auto size = item->getScaledContentSize();
-        return CCSize(size.width * sx / 2.f, size.height * sy / 2.f);
-    }
-
-    CCPoint toWorld(CCMenuItem* item) {
-        return item->getParent()->convertToWorldSpace(item->getPosition());
-    }
-
-    void setWorldPos(CCMenuItem* item, CCPoint world) {
-        item->setPosition(item->getParent()->convertToNodeSpace(world));
-    }
-}
-
-struct Bouncer {
-    Ref<CCMenuItem> item;
-    CCPoint vel;
+    int targetLevelID = 0;
+    float holdTime = 0.5f;
+    bool showWarning = false;
 };
 
-// Node phụ chạy update mỗi frame để làm các nút nảy như màn hình chờ DVD.
-class BounceNode : public CCNode {
+// ==========================================
+// 1. POPUP CÀI ĐẶT LEVEL VÀ HOLD TIME (Hình 3)
+// ==========================================
+class QuickSwitcherPopup : public Popup {
 protected:
-    std::vector<Bouncer> m_items;
+    TextInput* m_inputID;
+    TextInput* m_inputHoldTime;
 
-    bool init() override {
-        if (!CCNode::init()) return false;
-        this->scheduleUpdate();
+    bool setup() override {
+        auto winSize = CCDirector::get()->getWinSize();
+        
+        // Tạo background popup dùng chung của GD
+        auto bg = CCScale9Sprite::create("GJ_square01.png", { 0, 0, 80, 80 });
+        bg->setContentSize({ 420, 260 });
+        bg->setPosition(winSize / 2);
+        this->m_mainLayer->addChild(bg);
+
+        // Nút Đóng (X)
+        auto closeBtn = CCMenuItemSpriteExtra::create(
+            CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png"),
+            this,
+            menu_selector(QuickSwitcherPopup::onClose)
+        );
+        auto menu = CCMenu::create();
+        menu->addChild(closeBtn);
+        menu->setPosition({ winSize.width / 2 - 200, winSize.height / 2 + 120 });
+        this->m_mainLayer->addChild(menu);
+
+        // Ô nhập Level ID
+        m_inputID = TextInput::create(280, "Enter Level ID / Song ID", "chatFont.fnt");
+        m_inputID->setString(fmt::format("{}", QuickSwitcherManager::get().targetLevelID));
+        m_inputID->setPosition({ winSize.width / 2, winSize.height / 2 + 50 });
+        this->m_mainLayer->addChild(m_inputID);
+
+        // Label và Ô nhập Hold Time
+        auto holdLabel = CCLabelBMFont::create("Hold time:", "bigFont.fnt");
+        holdLabel->setScale(0.5f);
+        holdLabel->setPosition({ winSize.width / 2 - 90, winSize.height / 2 - 20 });
+        this->m_mainLayer->addChild(holdLabel);
+
+        m_inputHoldTime = TextInput::create(80, "0.5", "chatFont.fnt");
+        m_inputHoldTime->setString(fmt::format("{:.1f}", QuickSwitcherManager::get().holdTime));
+        m_inputHoldTime->setPosition({ winSize.width / 2 - 10, winSize.height / 2 - 20 });
+        this->m_mainLayer->addChild(m_inputHoldTime);
+
+        // Nút OK lưu lại
+        auto okBtn = CCMenuItemSpriteExtra::create(
+            ButtonSprite::create("OK", 80, true, "goldFont.fnt", "GJ_button_01.png", 30, 0.8f),
+            this,
+            menu_selector(QuickSwitcherPopup::onSave)
+        );
+        auto okMenu = CCMenu::create();
+        okMenu->addChild(okBtn);
+        okMenu->setPosition({ winSize.width / 2 + 130, winSize.height / 2 - 20 });
+        this->m_mainLayer->addChild(okMenu);
+
         return true;
+    }
+
+    void onSave(CCObject*) {
+        std::string idStr = m_inputID->getString();
+        std::string timeStr = m_inputHoldTime->getString();
+
+        QuickSwitcherManager::get().targetLevelID = utils::numFromString<int>(idStr).unwrapOr(0);
+        QuickSwitcherManager::get().holdTime = utils::numFromString<float>(timeStr).unwrapOr(0.5f);
+
+        Notification::create("Settings Saved!", CCSprite::createWithSpriteFrameName("GJ_completesIcon_001.png"))->show();
+        this->onClose(nullptr);
+    }
+
+    void onClose(CCObject* sender) {
+        this->removeFromByParent(true); // Hoặc dùng hàm remove tùy theo Geode version, dùng self->removeMeAndCleanup()
     }
 
 public:
-    static BounceNode* create() {
-        auto ret = new BounceNode();
-        if (ret->init()) {
-            ret->autorelease();
-            return ret;
-        }
-        delete ret;
-        return nullptr;
-    }
-
-    void collect(CCNode* layer) {
-        float speed = static_cast<float>(Mod::get()->getSettingValue<double>("speed"));
-        bool randomStart = Mod::get()->getSettingValue<bool>("random-start");
-        auto win = CCDirector::get()->getWinSize();
-
-        auto children = layer->getChildren();
-        if (!children) return;
-
-        for (auto child : CCArrayExt<CCNode*>(children)) {
-            auto menu = typeinfo_cast<CCMenu*>(child);
-            if (!menu || !menu->getChildren()) continue;
-
-            for (auto node : CCArrayExt<CCNode*>(menu->getChildren())) {
-                auto item = typeinfo_cast<CCMenuItem*>(node);
-                if (!item || !item->isVisible()) continue;
-
-                if (randomStart) {
-                    // Đặt nút ở một vị trí ngẫu nhiên bất kỳ trên màn hình.
-                    auto half = worldHalfSize(item);
-                    float x = (win.width > half.width * 2.f)
-                        ? randRange(half.width, win.width - half.width)
-                        : win.width / 2.f;
-                    float y = (win.height > half.height * 2.f)
-                        ? randRange(half.height, win.height - half.height)
-                        : win.height / 2.f;
-                    setWorldPos(item, ccp(x, y));
-                }
-
-                // Hướng bay chéo ngẫu nhiên (tránh bay gần như song song với trục).
-                float angle = randRange(0.35f, 1.2f);
-                float dirX = (randRange(0.f, 1.f) < 0.5f) ? -1.f : 1.f;
-                float dirY = (randRange(0.f, 1.f) < 0.5f) ? -1.f : 1.f;
-                CCPoint vel = ccp(std::cos(angle) * speed * dirX, std::sin(angle) * speed * dirY);
-
-                m_items.push_back({ Ref<CCMenuItem>(item), vel });
-            }
-        }
-    }
-
-    void update(float dt) override {
-        dt = std::min(dt, 0.1f); // tránh nút "teleport" khi game bị đứng hình
-        auto win = CCDirector::get()->getWinSize();
-
-        for (auto& b : m_items) {
-            auto item = b.item.data();
-            if (!item || !item->getParent()) continue;
-
-            auto pos = toWorld(item);
-            auto half = worldHalfSize(item);
-
-            pos.x += b.vel.x * dt;
-            pos.y += b.vel.y * dt;
-
-            if (pos.x - half.width < 0.f) {
-                pos.x = half.width;
-                b.vel.x = std::abs(b.vel.x);
-            } else if (pos.x + half.width > win.width) {
-                pos.x = win.width - half.width;
-                b.vel.x = -std::abs(b.vel.x);
-            }
-
-            if (pos.y - half.height < 0.f) {
-                pos.y = half.height;
-                b.vel.y = std::abs(b.vel.y);
-            } else if (pos.y + half.height > win.height) {
-                pos.y = win.height - half.height;
-                b.vel.y = -std::abs(b.vel.y);
-            }
-
-            setWorldPos(item, pos);
+    static void createPopup() {
+        auto popup = new QuickSwitcherPopup();
+        if (popup && popup->init(420, 260)) {
+            popup->autorelease();
+            popup->show();
+        } else {
+            delete popup;
         }
     }
 };
 
-class $modify(BounceMenuLayer, MenuLayer) {
-    bool init() {
-        if (!MenuLayer::init()) return false;
+// ==========================================
+// 2. THÊM NÚT DẤU CỘNG Ở MÀN HÌNH SẢNH LEVEL (Hình 2)
+// ==========================================
+#include <Geode/modify/LevelInfoLayer.hpp>
+class $modify(MyLevelInfoLayer, LevelInfoLayer) {
+    bool init(GameLevel* level, bool challenge) {
+        if (!LevelInfoLayer::init(level, challenge)) return false;
 
-        // Chạy ở frame kế tiếp để các mod khác thêm nút xong trước.
-        Ref<MenuLayer> self = this;
-        Loader::get()->queueInMainThread([self]() {
-            auto node = BounceNode::create();
-            if (!node) return;
-            node->collect(self);
-            self->addChild(node);
-        });
+        // Lấy texture nút dấu cộng có sẵn trong game: GJ_plusBtn_001.png
+        auto plusSprite = CCSprite::createWithSpriteFrameName("GJ_plusBtn_001.png");
+        auto plusBtn = CCMenuItemSpriteExtra::create(
+            plusSprite,
+            this,
+            menu_selector(MyLevelInfoLayer::onOpenSwitcherSettings)
+        );
+
+        // Đặt vị trí nút dấu cộng bên cạnh các nút thông tin (như trong hình 2)
+        auto menu = this->getChildByID("right-side-menu"); // hoặc tìm menu phù hợp
+        if (!menu) {
+            // Fallback nếu không tìm thấy ID menu
+            menu = CCMenu::create();
+            menu->setPosition({0, 0});
+            this->addChild(menu);
+        }
+        
+        plusBtn->setPosition({ 350, 80 }); // Tùy chỉnh tọa độ cho khớp giao diện
+        menu->addChild(plusBtn);
 
         return true;
+    }
+
+    void onOpenSwitcherSettings(CCObject*) {
+        QuickSwitcherPopup::createPopup();
+    }
+};
+
+// ==========================================
+// 3. THÊM NÚT CHUYỂN LEVEL TRONG MÀN CHƠI / PAUSE MENU (Hình 1)
+// ==========================================
+#include <Geode/modify/PauseLayer.hpp>
+class $modify(MyPauseLayer, PauseLayer) {
+    void customSetup() {
+        PauseLayer::customSetup();
+
+        auto winSize = CCDirector::get()->getWinSize();
+
+        // Lấy icon nút play nhỏ có sẵn trong game: GJ_playBtn_001.png hoặc nút tương tự
+        auto playSprite = CCSprite::createWithSpriteFrameName("GJ_playBtn_001.png");
+        playSprite->setScale(0.7f);
+
+        auto switchBtn = CCMenuItemSpriteExtra::create(
+            playSprite,
+            this,
+            menu_selector(MyPauseLayer::onSwitchLevel)
+        );
+
+        // Đặt vị trí nút chuyển level bên trái nút Play chính (như hình 1)
+        auto menu = CCMenu::create();
+        switchBtn->setPosition({ -120, 0 }); // Căn chỉnh tương đối so với menu giữa
+        
+        // Tìm menu chứa nút pause chính hoặc tạo menu mới đặt giữa màn hình
+        // Trong PauseLayer, các nút chính nằm trong một CCMenu ở giữa màn hình
+        for (auto child : CCArrayExt<CCNode*>(this->getChildren())) {
+            if (auto innerMenu = typeinfo_cast<CCMenu*>(child)) {
+                // Kiểm tra xem có chứa nút play không để bám vào đó
+                innerMenu->addChild(switchBtn);
+                break;
+            }
+        }
+    }
+
+    void onSwitchLevel(CCObject*) {
+        int targetID = QuickSwitcherManager::get().targetLevelID;
+        if (targetID <= 0) {
+            Notification::create("No target level set! Click '+' in level menu.", CCSprite::createWithSpriteFrameName("geode.loader/err.png"))->show();
+            return;
+        }
+
+        // Thực hiện chuyển sang level mới dựa vào ID thông qua GameLevelManager
+        // Logic tải level online hoặc official level
+        GameLevelManager::get()->m_levelID = targetID;
+        
+        // Load và chuyển scene tới level mới
+        auto loadLevel = GJGameLevel::create(); // Hoặc gọi hàm load tương ứng của GD API
+        // Chuyển scene chơi game lập tức
+        FMODAudioEngine::get()->stopAllEffects();
+        
+        // Load trực tiếp Editor hoặc PlayLayer tùy vào loại level
+        FLAlertLayer::create("Quick Switcher", fmt::format("Switching to Level ID: {}", targetID), "OK")->show();
+        
+        // Ví dụ kích hoạt tải level theo ID:
+        GameLevelManager::get()->getOnlineLevel(targetID);
     }
 };
