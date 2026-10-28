@@ -1,204 +1,118 @@
 #include <Geode/Geode.hpp>
-#include <Geode/ui/GeodeUI.hpp>
-#include <Geode/binding/LevelInfoLayer.hpp>
-#include <Geode/binding/PlayLayer.hpp>
-#include <Geode/binding/PauseLayer.hpp>
-#include <Geode/binding/GameLevel.hpp>
-#include <Geode/binding/MenuLayer.hpp>
-#include <Geode/binding/GameManager.hpp>
+#include <Geode/modify/LevelInfoLayer.hpp>
+#include <Geode/modify/PauseLayer.hpp>
 
 using namespace geode::prelude;
 
-// Lưu trữ cấu hình cài đặt trong Mod Settings hoặc Global variables đơn giản
-class QuickSwitcherManager {
-public:
-    static QuickSwitcherManager& get() {
-        static QuickSwitcherManager instance;
-        return instance;
+/*
+ * Quick Level Switcher — integration scaffold
+ *
+ * This file deliberately does NOT pretend the online-level download and
+ * gameplay transition pipeline is finished. The UI hooks below are safe
+ * discovery points; complete online lookup/download and long-press handling
+ * must be connected to the exact generated bindings for the installed
+ * Geode 5 SDK and GD 2.2081.
+ */
+
+namespace qls {
+    constexpr char const* kHoldTimeSetting = "hold-time";
+    constexpr char const* kWarnSetting = "warn-switch";
+
+    void showNotImplementedNotice() {
+        FLAlertLayer::create(
+            "Quick Level Switcher",
+            "The UI hook is installed, but online level lookup/download and "
+            "the long-press level transition are not wired up in this "
+            "prototype yet. See README.md before extending it.",
+            "OK"
+        )->show();
     }
 
-    int targetLevelID = 0;
-    float holdTime = 0.5f;
-    bool showWarning = false;
-};
+    // Uses a game-provided sprite frame; no custom image asset is drawn.
+    // If this frame name differs in a particular texture pack/build, replace
+    // it with a frame name confirmed in the local game's sprite sheets.
+    CCMenuItemSpriteExtra* makeGameSpriteButton(
+        char const* frameName,
+        CCObject* target,
+        SEL_MenuHandler callback,
+        float scale = 0.65f
+    ) {
+        auto sprite = CCSprite::createWithSpriteFrameName(frameName);
+        if (!sprite) {
+            log::warn("Quick Level Switcher: sprite frame '{}' was not found", frameName);
+            return nullptr;
+        }
 
-// ==========================================
-// 1. POPUP CÀI ĐẶT LEVEL VÀ HOLD TIME (Hình 3)
-// ==========================================
-class QuickSwitcherPopup : public Popup {
-protected:
-    TextInput* m_inputID;
-    TextInput* m_inputHoldTime;
+        sprite->setScale(scale);
+        return CCMenuItemSpriteExtra::create(sprite, target, callback);
+    }
+}
 
-    bool setup() override {
-        auto winSize = CCDirector::get()->getWinSize();
-        
-        // Tạo background popup dùng chung của GD
-        auto bg = CCScale9Sprite::create("GJ_square01.png", { 0, 0, 80, 80 });
-        bg->setContentSize({ 420, 260 });
-        bg->setPosition(winSize / 2);
-        this->m_mainLayer->addChild(bg);
+// Level details screen: add a plus button to open the management entry point.
+class $modify(QLS_LevelInfoLayer, LevelInfoLayer) {
+    void onEnter() {
+        LevelInfoLayer::onEnter();
 
-        // Nút Đóng (X)
-        auto closeBtn = CCMenuItemSpriteExtra::create(
-            CCSprite::createWithSpriteFrameName("GJ_closeBtn_001.png"),
-            this,
-            menu_selector(QuickSwitcherPopup::onClose)
-        );
+        // Avoid duplicate buttons if another mod causes onEnter more than once.
+        if (this->getChildByID("qls-level-info-menu")) return;
+
         auto menu = CCMenu::create();
-        menu->addChild(closeBtn);
-        menu->setPosition({ winSize.width / 2 - 200, winSize.height / 2 + 120 });
-        this->m_mainLayer->addChild(menu);
+        if (!menu) return;
+        menu->setID("qls-level-info-menu");
+        menu->setPosition(CCPointZero);
 
-        // Ô nhập Level ID
-        m_inputID = TextInput::create(280, "Enter Level ID / Song ID", "chatFont.fnt");
-        m_inputID->setString(fmt::format("{}", QuickSwitcherManager::get().targetLevelID));
-        m_inputID->setPosition({ winSize.width / 2, winSize.height / 2 + 50 });
-        this->m_mainLayer->addChild(m_inputID);
-
-        // Label và Ô nhập Hold Time
-        auto holdLabel = CCLabelBMFont::create("Hold time:", "bigFont.fnt");
-        holdLabel->setScale(0.5f);
-        holdLabel->setPosition({ winSize.width / 2 - 90, winSize.height / 2 - 20 });
-        this->m_mainLayer->addChild(holdLabel);
-
-        m_inputHoldTime = TextInput::create(80, "0.5", "chatFont.fnt");
-        m_inputHoldTime->setString(fmt::format("{:.1f}", QuickSwitcherManager::get().holdTime));
-        m_inputHoldTime->setPosition({ winSize.width / 2 - 10, winSize.height / 2 - 20 });
-        this->m_mainLayer->addChild(m_inputHoldTime);
-
-        // Nút OK lưu lại
-        auto okBtn = CCMenuItemSpriteExtra::create(
-            ButtonSprite::create("OK", 80, true, "goldFont.fnt", "GJ_button_01.png", 30, 0.8f),
+        // Existing Geometry Dash plus-button frame. Verify locally if a
+        // texture pack changes/renames sprite frames.
+        auto button = qls::makeGameSpriteButton(
+            "GJ_plusBtn_001.png",
             this,
-            menu_selector(QuickSwitcherPopup::onSave)
+            menu_selector(QLS_LevelInfoLayer::onQLSOpen),
+            0.65f
         );
-        auto okMenu = CCMenu::create();
-        okMenu->addChild(okBtn);
-        okMenu->setPosition({ winSize.width / 2 + 130, winSize.height / 2 - 20 });
-        this->m_mainLayer->addChild(okMenu);
 
-        return true;
-    }
-
-    void onSave(CCObject*) {
-        std::string idStr = m_inputID->getString();
-        std::string timeStr = m_inputHoldTime->getString();
-
-        QuickSwitcherManager::get().targetLevelID = utils::numFromString<int>(idStr).unwrapOr(0);
-        QuickSwitcherManager::get().holdTime = utils::numFromString<float>(timeStr).unwrapOr(0.5f);
-
-        Notification::create("Settings Saved!", CCSprite::createWithSpriteFrameName("GJ_completesIcon_001.png"))->show();
-        this->onClose(nullptr);
-    }
-
-    void onClose(CCObject* sender) {
-        this->removeFromByParent(true); // Hoặc dùng hàm remove tùy theo Geode version, dùng self->removeMeAndCleanup()
-    }
-
-public:
-    static void createPopup() {
-        auto popup = new QuickSwitcherPopup();
-        if (popup && popup->init(420, 260)) {
-            popup->autorelease();
-            popup->show();
-        } else {
-            delete popup;
+        if (button) {
+            auto winSize = CCDirector::sharedDirector()->getWinSize();
+            button->setPosition({winSize.width * 0.87f, winSize.height * 0.47f});
+            menu->addChild(button);
+            this->addChild(menu, 100);
         }
+    }
+
+    void onQLSOpen(CCObject*) {
+        qls::showNotImplementedNotice();
     }
 };
 
-// ==========================================
-// 2. THÊM NÚT DẤU CỘNG Ở MÀN HÌNH SẢNH LEVEL (Hình 2)
-// ==========================================
-#include <Geode/modify/LevelInfoLayer.hpp>
-class $modify(MyLevelInfoLayer, LevelInfoLayer) {
-    bool init(GameLevel* level, bool challenge) {
-        if (!LevelInfoLayer::init(level, challenge)) return false;
-
-        // Lấy texture nút dấu cộng có sẵn trong game: GJ_plusBtn_001.png
-        auto plusSprite = CCSprite::createWithSpriteFrameName("GJ_plusBtn_001.png");
-        auto plusBtn = CCMenuItemSpriteExtra::create(
-            plusSprite,
-            this,
-            menu_selector(MyLevelInfoLayer::onOpenSwitcherSettings)
-        );
-
-        // Đặt vị trí nút dấu cộng bên cạnh các nút thông tin (như trong hình 2)
-        auto menu = this->getChildByID("right-side-menu"); // hoặc tìm menu phù hợp
-        if (!menu) {
-            // Fallback nếu không tìm thấy ID menu
-            menu = CCMenu::create();
-            menu->setPosition({0, 0});
-            this->addChild(menu);
-        }
-        
-        plusBtn->setPosition({ 350, 80 }); // Tùy chỉnh tọa độ cho khớp giao diện
-        menu->addChild(plusBtn);
-
-        return true;
-    }
-
-    void onOpenSwitcherSettings(CCObject*) {
-        QuickSwitcherPopup::createPopup();
-    }
-};
-
-// ==========================================
-// 3. THÊM NÚT CHUYỂN LEVEL TRONG MÀN CHƠI / PAUSE MENU (Hình 1)
-// ==========================================
-#include <Geode/modify/PauseLayer.hpp>
-class $modify(MyPauseLayer, PauseLayer) {
+// Pause screen: add a game-sprite button as the future long-press switch control.
+// The current prototype intentionally does not switch levels on a normal click.
+class $modify(QLS_PauseLayer, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
 
-        auto winSize = CCDirector::get()->getWinSize();
+        if (this->getChildByID("qls-pause-menu")) return;
 
-        // Lấy icon nút play nhỏ có sẵn trong game: GJ_playBtn_001.png hoặc nút tương tự
-        auto playSprite = CCSprite::createWithSpriteFrameName("GJ_playBtn_001.png");
-        playSprite->setScale(0.7f);
+        auto menu = CCMenu::create();
+        if (!menu) return;
+        menu->setID("qls-pause-menu");
+        menu->setPosition(CCPointZero);
 
-        auto switchBtn = CCMenuItemSpriteExtra::create(
-            playSprite,
+        // Reuses a play-button frame from the game's own sprite sheets.
+        auto button = qls::makeGameSpriteButton(
+            "GJ_playBtn2_001.png",
             this,
-            menu_selector(MyPauseLayer::onSwitchLevel)
+            menu_selector(QLS_PauseLayer::onQLSAttemptSwitch),
+            0.42f
         );
 
-        // Đặt vị trí nút chuyển level bên trái nút Play chính (như hình 1)
-        auto menu = CCMenu::create();
-        switchBtn->setPosition({ -120, 0 }); // Căn chỉnh tương đối so với menu giữa
-        
-        // Tìm menu chứa nút pause chính hoặc tạo menu mới đặt giữa màn hình
-        // Trong PauseLayer, các nút chính nằm trong một CCMenu ở giữa màn hình
-        for (auto child : CCArrayExt<CCNode*>(this->getChildren())) {
-            if (auto innerMenu = typeinfo_cast<CCMenu*>(child)) {
-                // Kiểm tra xem có chứa nút play không để bám vào đó
-                innerMenu->addChild(switchBtn);
-                break;
-            }
+        if (button) {
+            auto winSize = CCDirector::sharedDirector()->getWinSize();
+            button->setPosition({winSize.width * 0.205f, winSize.height * 0.50f});
+            menu->addChild(button);
+            this->addChild(menu, 100);
         }
     }
 
-    void onSwitchLevel(CCObject*) {
-        int targetID = QuickSwitcherManager::get().targetLevelID;
-        if (targetID <= 0) {
-            Notification::create("No target level set! Click '+' in level menu.", CCSprite::createWithSpriteFrameName("geode.loader/err.png"))->show();
-            return;
-        }
-
-        // Thực hiện chuyển sang level mới dựa vào ID thông qua GameLevelManager
-        // Logic tải level online hoặc official level
-        GameLevelManager::get()->m_levelID = targetID;
-        
-        // Load và chuyển scene tới level mới
-        auto loadLevel = GJGameLevel::create(); // Hoặc gọi hàm load tương ứng của GD API
-        // Chuyển scene chơi game lập tức
-        FMODAudioEngine::get()->stopAllEffects();
-        
-        // Load trực tiếp Editor hoặc PlayLayer tùy vào loại level
-        FLAlertLayer::create("Quick Switcher", fmt::format("Switching to Level ID: {}", targetID), "OK")->show();
-        
-        // Ví dụ kích hoạt tải level theo ID:
-        GameLevelManager::get()->getOnlineLevel(targetID);
+    void onQLSAttemptSwitch(CCObject*) {
+        qls::showNotImplementedNotice();
     }
 };
