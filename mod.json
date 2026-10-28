@@ -13,7 +13,7 @@
 	"description": "Xáo trộn vị trí tất cả các nút bấm trong giao diện chính.",
 	"dependencies": {
 		"geode.node-ids": ">=v1.23.3"
-	}
+	},
 	"settings": {
 		"within-menu": {
 			"type": "bool",
