@@ -15,11 +15,19 @@
 		"geode.node-ids": ">=v1.23.3"
 	},
 	"settings": {
-		"within-menu": {
-			"type": "bool",
-			"name": "Chỉ xáo trộn trong cùng một menu",
-			"description": "Bật: các nút chỉ đổi chỗ với nút cùng nhóm. Tắt: tất cả nút đổi chỗ lẫn nhau.",
-			"default": false
-		}
+	"speed": {
+		"type": "float",
+		"name": "Tốc độ",
+		"description": "Tốc độ bay của các nút.",
+		"default": 120,
+		"min": 20,
+		"max": 500
+	},
+	"random-start": {
+		"type": "bool",
+		"name": "Vị trí bắt đầu ngẫu nhiên",
+		"description": "Bật: các nút xuất hiện ở chỗ ngẫu nhiên. Tắt: bắt đầu từ vị trí gốc.",
+		"default": true
 	}
+}
 }
