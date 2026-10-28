@@ -1,3 +1,4 @@
+
 {
   "geode": "5.0.0",
   "gd": {
@@ -10,10 +11,12 @@
   "name": "Quick Level Switcher",
   "version": "v0.1.0",
   "developer": "TidalWaveGod",
+  "description": "Quickly switch between alternate Geometry Dash levels.",
   "settings": {
     "hold-time": {
       "type": "float",
       "name": "Hold Time",
+      "description": "Time required to hold the switch button",
       "default": 0.5,
       "min": 0.1,
       "max": 3.0
