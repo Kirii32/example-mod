@@ -1,32 +1,27 @@
 {
-  "geode": "5.11.2",
+  "geode": "5.0.0",
   "gd": {
     "win": "2.2081",
-  "mac": "2.2081",
-  "android": "2.2081",
-  "ios": "2.2081"
+    "mac": "2.2081",
+    "android": "2.2081",
+    "ios": "2.2081"
   },
   "id": "tidalwave.quick-level-switcher",
   "name": "Quick Level Switcher",
-  "version": "0.1.0",
-  "developer": "TidalWave",
-  "description": "Prototype scaffold for quickly switching between a main level and saved practice levels.",
-  "settings": [
-    {
+  "version": "v0.1.0",
+  "developer": "TidalWaveGod",
+  "settings": {
+    "hold-time": {
       "type": "float",
       "name": "Hold Time",
-      "description": "Seconds to hold the pause-menu switch button. Default: 0.5 seconds.",
-      "id": "hold-time",
       "default": 0.5,
       "min": 0.1,
       "max": 3.0
     },
-    {
+    "warn-switch": {
       "type": "bool",
-      "name": "Warn when switching levels",
-      "description": "Show a confirmation warning before switching levels.",
-      "id": "warn-switch",
+      "name": "Warn Before Switching",
       "default": false
     }
-  ]
+  }
 }
