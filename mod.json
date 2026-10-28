@@ -6,28 +6,12 @@
 		"mac": "2.2081",
 		"ios": "2.2081"
 	},
-	"id": "yourname.shuffle-menu",
-	"name": "Shuffle Menu",
+	"id": "lam.quick_level_switcher",
+	"name": "level switcher",
 	"version": "1.0.0",
 	"developer": "PTLreal",
-	"description": "Xáo trộn vị trí tất cả các nút bấm trong giao diện chính.",
+	"description": "quickly change level",
 	"dependencies": {
 		"geode.node-ids": ">=v1.23.3"
-	},
-	"settings": {
-	"speed": {
-		"type": "float",
-		"name": "Tốc độ",
-		"description": "Tốc độ bay của các nút.",
-		"default": 120,
-		"min": 20,
-		"max": 500
-	},
-	"random-start": {
-		"type": "bool",
-		"name": "Vị trí bắt đầu ngẫu nhiên",
-		"description": "Bật: các nút xuất hiện ở chỗ ngẫu nhiên. Tắt: bắt đầu từ vị trí gốc.",
-		"default": true
 	}
-}
 }
