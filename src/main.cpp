@@ -39,12 +39,29 @@ namespace qls {
     ) {
         auto sprite = CCSprite::createWithSpriteFrameName(frameName);
         if (!sprite) {
-            log::warn("Quick Level Switcher: sprite frame '{}' was not found", frameName);
-            return nullptr;
+            log::warn("Quick Level Switcher: sprite frame '{}' was not found; using the standard GD button as fallback", frameName);
+            // The plus/play atlas frames are not present in every texture setup.
+            // GJ_button_01 is the standard in-game green button background.
+            sprite = CCSprite::createWithSpriteFrameName("GJ_button_01.png");
+            if (!sprite) {
+                log::error("Quick Level Switcher: standard button frame GJ_button_01.png is also missing");
+                return nullptr;
+            }
+            auto glyph = CCLabelBMFont::create(
+                frameName == std::string("GJ_plusBtn_001.png") ? "+" : ">",
+                "bigFont.fnt"
+            );
+            if (glyph) {
+                glyph->setScale(0.8f);
+                glyph->setPosition(ccp(sprite->getContentSize().width / 2.f, sprite->getContentSize().height / 2.f));
+                sprite->addChild(glyph, 10);
+            }
         }
 
         sprite->setScale(scale);
-        return CCMenuItemSpriteExtra::create(sprite, target, callback);
+        auto item = CCMenuItemSpriteExtra::create(sprite, target, callback);
+        if (item) item->setID("qls-action-button");
+        return item;
     }
 }
 
