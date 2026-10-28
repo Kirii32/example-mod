@@ -1,17 +1,25 @@
 {
-	"geode": "$GEODE_VERSION",
+	"geode": "5.11.2",
 	"gd": {
 		"win": "2.2081",
 		"android": "2.2081",
 		"mac": "2.2081",
 		"ios": "2.2081"
 	},
-	"id": "$MOD_ID",
-	"name": "$MOD_NAME",
-	"version": "$MOD_VERSION",
-	"developer": "$MOD_DEVELOPER",
-	"description": "$MOD_DESCRIPTION",
+	"id": "yourname.shuffle-menu",
+	"name": "Shuffle Menu",
+	"version": "1.0.0",
+	"developer": "PTLreal",
+	"description": "Xáo trộn vị trí tất cả các nút bấm trong giao diện chính.",
 	"dependencies": {
 		"geode.node-ids": ">=v1.23.3"
+	}
+	"settings": {
+		"within-menu": {
+			"type": "bool",
+			"name": "Chỉ xáo trộn trong cùng một menu",
+			"description": "Bật: các nút chỉ đổi chỗ với nút cùng nhóm. Tắt: tất cả nút đổi chỗ lẫn nhau.",
+			"default": false
+		}
 	}
 }
