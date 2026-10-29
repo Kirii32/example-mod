@@ -1,13 +1,13 @@
 {
-	"geode": "4.0.0",
+	"geode": "5.11.2",
 	"gd": {
-		"win": "2.2074",
-		"android": "2.2074",
-		"mac": "2.2074"
+		"win": "2.2081",
+		"android": "2.2081",
+		"mac": "2.2081"
 	},
-	"id": "yourname.shuffle-menu",
-	"name": "Shuffle Menu",
+	"id": "yourname.quick-level-switch",
+	"name": "Quick Level Switch",
 	"version": "v1.0.0",
-	"developer": "yourname",
-	"description": "Xáo trộn vị trí tất cả các nút bấm trong giao diện chính."
+	"developer": "PTLreal",
+	"description": "Chuyen level nhanh khi dang choi"
 }
