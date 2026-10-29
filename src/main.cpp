@@ -96,52 +96,44 @@ public:
 // Chuyển sang level đã chọn
 // ---------------------------------------------------------------------------
 
-// Chờ level cũ được huỷ hẳn rồi mới tạo PlayLayer mới.
-// (Nếu tạo PlayLayer mới trong lúc PlayLayer cũ còn sống, lúc PlayLayer cũ bị huỷ nó sẽ
-// xoá con trỏ PlayLayer toàn cục, khiến game/mod khác bị crash vài giây sau đó.)
-class SwitchRunner : public CCNode {
-protected:
-    Ref<GJGameLevel> m_level;
-    int m_frames = 0;
-
-    bool init(GJGameLevel* level) {
-        if (!CCNode::init()) return false;
-        m_level = level;
-        this->scheduleUpdate();
-        return true;
-    }
-
-public:
-    static SwitchRunner* create(GJGameLevel* level) {
-        auto ret = new SwitchRunner();
-        if (ret->init(level)) {
-            ret->autorelease();
-            return ret;
+namespace qs {
+    // Tìm PauseLayer đang hiển thị (nằm trong scene hiện tại, tối đa 2 cấp)
+    PauseLayer* findPause(CCNode* node, int depth = 0) {
+        if (!node || depth > 2) return nullptr;
+        if (auto pause = typeinfo_cast<PauseLayer*>(node)) return pause;
+        if (auto children = node->getChildren()) {
+            for (auto child : CCArrayExt<CCNode*>(children)) {
+                if (auto pause = findPause(child, depth + 1)) return pause;
+            }
         }
-        delete ret;
         return nullptr;
     }
 
-    void update(float) override {
-        m_frames++;
-        // Đợi tới khi PlayLayer cũ đã bị huỷ (tối đa 30 frame phòng khi con trỏ không được xoá)
-        if (PlayLayer::get() && m_frames < 30) return;
-
-        this->unscheduleUpdate();
-        auto scene = PlayLayer::scene(m_level, false, false);
-        CCDirector::get()->replaceScene(CCTransitionFade::create(0.4f, scene));
+    // Đợi tới khi game đã thoát hẳn level cũ (PlayLayer cũ bị huỷ, hết hiệu ứng chuyển cảnh)
+    // rồi mới tạo PlayLayer mới. Mỗi frame kiểm tra một lần, tối đa ~10 giây.
+    void waitAndPlay(Ref<GJGameLevel> level, int frames) {
+        Loader::get()->queueInMainThread([level, frames]() {
+            auto director = CCDirector::get();
+            bool busy = PlayLayer::get() != nullptr
+                || typeinfo_cast<CCTransitionScene*>(director->getRunningScene()) != nullptr;
+            if (busy) {
+                if (frames < 600) waitAndPlay(level, frames + 1);
+                return; // quá thời gian chờ thì bỏ qua
+            }
+            auto scene = PlayLayer::scene(level, false, false);
+            director->replaceScene(CCTransitionFade::create(0.4f, scene));
+        });
     }
-};
 
-namespace qs {
     void startLevel(GJGameLevel* level) {
-        // Bước 1: rời hẳn level hiện tại sang một scene trống (PlayLayer cũ bị huỷ).
-        // Bước 2: SwitchRunner trong scene trống đó sẽ tạo PlayLayer mới.
-        auto scene = CCScene::create();
-        if (auto runner = SwitchRunner::create(level)) {
-            scene->addChild(runner);
+        // Thoát level hiện tại bằng đúng đường thoát của game (nút Exit trong menu tạm dừng),
+        // để mọi mod khác dọn dẹp bình thường. Sau đó mới vào level mới.
+        if (auto pause = findPause(CCDirector::get()->getRunningScene())) {
+            pause->onQuit(nullptr);
+        } else if (auto playLayer = PlayLayer::get()) {
+            playLayer->onQuit();
         }
-        CCDirector::get()->replaceScene(scene);
+        waitAndPlay(level, 0);
     }
 
     void switchToTarget() {
