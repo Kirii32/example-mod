@@ -95,10 +95,53 @@ public:
 // ---------------------------------------------------------------------------
 // Chuyển sang level đã chọn
 // ---------------------------------------------------------------------------
+
+// Chờ level cũ được huỷ hẳn rồi mới tạo PlayLayer mới.
+// (Nếu tạo PlayLayer mới trong lúc PlayLayer cũ còn sống, lúc PlayLayer cũ bị huỷ nó sẽ
+// xoá con trỏ PlayLayer toàn cục, khiến game/mod khác bị crash vài giây sau đó.)
+class SwitchRunner : public CCNode {
+protected:
+    Ref<GJGameLevel> m_level;
+    int m_frames = 0;
+
+    bool init(GJGameLevel* level) {
+        if (!CCNode::init()) return false;
+        m_level = level;
+        this->scheduleUpdate();
+        return true;
+    }
+
+public:
+    static SwitchRunner* create(GJGameLevel* level) {
+        auto ret = new SwitchRunner();
+        if (ret->init(level)) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+
+    void update(float) override {
+        m_frames++;
+        // Đợi tới khi PlayLayer cũ đã bị huỷ (tối đa 30 frame phòng khi con trỏ không được xoá)
+        if (PlayLayer::get() && m_frames < 30) return;
+
+        this->unscheduleUpdate();
+        auto scene = PlayLayer::scene(m_level, false, false);
+        CCDirector::get()->replaceScene(CCTransitionFade::create(0.4f, scene));
+    }
+};
+
 namespace qs {
     void startLevel(GJGameLevel* level) {
-        auto scene = PlayLayer::scene(level, false, false);
-        CCDirector::get()->replaceScene(CCTransitionFade::create(0.5f, scene));
+        // Bước 1: rời hẳn level hiện tại sang một scene trống (PlayLayer cũ bị huỷ).
+        // Bước 2: SwitchRunner trong scene trống đó sẽ tạo PlayLayer mới.
+        auto scene = CCScene::create();
+        if (auto runner = SwitchRunner::create(level)) {
+            scene->addChild(runner);
+        }
+        CCDirector::get()->replaceScene(scene);
     }
 
     void switchToTarget() {
@@ -107,9 +150,28 @@ namespace qs {
             Notification::create("No level selected. Use the + button in the level page.", NotificationIcon::Warning)->show();
             return;
         }
+
+        // Ghi nhớ level đang chơi để lần giữ nút tiếp theo quay lại được level này.
+        int curId = 0;
+        std::string curName;
+        if (auto pl = PlayLayer::get(); pl && pl->m_level) {
+            curId = pl->m_level->m_levelID.value();
+            curName = std::string(pl->m_level->m_levelName);
+        }
+        if (curId == id) {
+            Notification::create("You are already playing the selected level", NotificationIcon::Warning)->show();
+            return;
+        }
+
         bool async = LevelFetcher::fetch(
             id,
-            [](GJGameLevel* level) { startLevel(level); },
+            [curId, curName, id](GJGameLevel* level) {
+                // Hoán đổi: level đang chơi trở thành level đích mới (chỉ khi nó là level online)
+                if (curId > 0 && curId != id) {
+                    setTarget(curId, curName);
+                }
+                startLevel(level);
+            },
             []() { Notification::create("Could not download the level", NotificationIcon::Error)->show(); }
         );
         if (async) {
