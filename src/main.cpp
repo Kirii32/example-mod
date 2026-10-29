@@ -422,10 +422,10 @@ class $modify(QSPauseLayer, PauseLayer) {
             // Dự phòng nếu không tìm thấy menu theo ID
             auto winSize = CCDirector::get()->getWinSize();
             btn->setPosition(ccp(winSize.width * 0.205f, winSize.height * 0.401f));
-            auto menu = CCMenu::create();
-            menu->setPosition(CCPointZero);
-            menu->addChild(btn);
-            this->addChild(menu, 10);
+            auto fallbackMenu = CCMenu::create();
+            fallbackMenu->setPosition(CCPointZero);
+            fallbackMenu->addChild(btn);
+            this->addChild(fallbackMenu, 10);
         }
     }
 };
