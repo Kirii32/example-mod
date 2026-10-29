@@ -1,6 +1,7 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/LevelInfoLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/modify/CCMenuItemSpriteExtra.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/ui/Notification.hpp>
@@ -133,53 +134,36 @@ namespace qs {
 }
 
 // ---------------------------------------------------------------------------
-// Nút phải giữ một khoảng thời gian mới kích hoạt (có vòng tiến trình)
+// Bộ đếm giữ nút (có vòng tiến trình). Được gắn làm con của một nút THẬT của game
+// (CCMenuItemSpriteExtra) để chắc chắn nhận được cú chạm.
 // ---------------------------------------------------------------------------
-class HoldButton : public CCMenuItem {
+class HoldTimer : public CCNode {
 protected:
     std::function<void()> m_onHold;
     CCProgressTimer* m_ring = nullptr;
     float m_holdTime = 0.5f;
     float m_elapsed = 0.f;
-    float m_baseScale = 1.f;
-    bool m_holding = false;
+    bool m_running = false;
 
-    bool init(CCSprite* icon, CCSprite* ringSprite, float holdTime, std::function<void()> onHold, float scale) {
-        if (!CCMenuItem::init()) return false;
+    bool init(CCSprite* ringSprite, float holdTime, std::function<void()> onHold, float scale) {
+        if (!CCNode::init()) return false;
 
         m_holdTime = std::max(holdTime, 0.05f);
         m_onHold = std::move(onHold);
-        m_baseScale = scale;
-
-        auto size = icon->getContentSize();
-        this->setContentSize(size);
-        icon->setPosition(ccp(size.width / 2.f, size.height / 2.f));
-        this->addChild(icon);
 
         ringSprite->setOpacity(170);
         m_ring = CCProgressTimer::create(ringSprite);
         m_ring->setType(kCCProgressTimerTypeRadial);
         m_ring->setPercentage(0.f);
-        m_ring->setPosition(ccp(size.width / 2.f, size.height / 2.f));
-        this->addChild(m_ring, 1);
-
-        this->setScale(scale);
+        m_ring->setScale(scale);
+        this->addChild(m_ring);
         return true;
     }
 
-    void resetHold() {
-        m_holding = false;
-        m_elapsed = 0.f;
-        this->unscheduleUpdate();
-        m_ring->setPercentage(0.f);
-        this->stopAllActions();
-        this->runAction(CCScaleTo::create(0.1f, m_baseScale));
-    }
-
 public:
-    static HoldButton* create(CCSprite* icon, CCSprite* ring, float holdTime, std::function<void()> onHold, float scale = 1.f) {
-        auto ret = new HoldButton();
-        if (ret->init(icon, ring, holdTime, std::move(onHold), scale)) {
+    static HoldTimer* create(CCSprite* ringSprite, float holdTime, std::function<void()> onHold, float scale) {
+        auto ret = new HoldTimer();
+        if (ret->init(ringSprite, holdTime, std::move(onHold), scale)) {
             ret->autorelease();
             return ret;
         }
@@ -187,32 +171,45 @@ public:
         return nullptr;
     }
 
-    void selected() override {
-        CCMenuItem::selected();
-        m_holding = true;
+    void begin() {
+        m_running = true;
         m_elapsed = 0.f;
-        this->stopAllActions();
-        this->runAction(CCScaleTo::create(0.1f, m_baseScale * 1.15f));
         this->scheduleUpdate();
     }
 
-    void unselected() override {
-        CCMenuItem::unselected();
-        this->resetHold();
+    void cancel() {
+        m_running = false;
+        m_elapsed = 0.f;
+        this->unscheduleUpdate();
+        m_ring->setPercentage(0.f);
     }
 
-    // Nhả tay sớm thì không làm gì cả.
-    void activate() override {}
-
     void update(float dt) override {
-        if (!m_holding) return;
+        if (!m_running) return;
         m_elapsed += dt;
         m_ring->setPercentage(std::min(100.f, m_elapsed / m_holdTime * 100.f));
         if (m_elapsed >= m_holdTime) {
-            m_holding = false;
+            m_running = false;
             this->unscheduleUpdate();
             auto cb = m_onHold;
             if (cb) cb(); // có thể thay scene, nên không đụng gì thêm sau dòng này
+        }
+    }
+};
+
+// Hook nút của game: khi nút có HoldTimer con thì bắt đầu/huỷ đếm theo cú chạm.
+class $modify(QSMenuItem, CCMenuItemSpriteExtra) {
+    void selected() {
+        CCMenuItemSpriteExtra::selected();
+        if (auto timer = typeinfo_cast<HoldTimer*>(this->getChildByID("hold-timer"_spr))) {
+            timer->begin();
+        }
+    }
+
+    void unselected() {
+        CCMenuItemSpriteExtra::unselected();
+        if (auto timer = typeinfo_cast<HoldTimer*>(this->getChildByID("hold-timer"_spr))) {
+            timer->cancel();
         }
     }
 };
@@ -404,14 +401,31 @@ class $modify(QSLevelInfoLayer, LevelInfoLayer) {
 // Menu tạm dừng: nút play phải giữ để chuyển level
 // ---------------------------------------------------------------------------
 class $modify(QSPauseLayer, PauseLayer) {
+    void onQuickSwitchNoop(CCObject*) {}
+
     void customSetup() {
         PauseLayer::customSetup();
 
-        auto icon = qs::frameSprite({"GJ_playMusicBtn_001.png", "GJ_playBtn2_001.png"});
-        auto ring = qs::frameSprite({"GJ_playMusicBtn_001.png", "GJ_playBtn2_001.png"});
-        auto btn = HoldButton::create(icon, ring, qs::holdTime(), []() { qs::requestSwitch(); }, 1.f);
-        if (!btn) return;
+        constexpr float kScale = 0.55f;
+
+        // Dùng icon play có sẵn của game, thu nhỏ lại
+        auto icon = qs::frameSprite({"GJ_playBtn2_001.png"});
+        icon->setScale(kScale);
+        auto btn = CCMenuItemSpriteExtra::create(icon, this, menu_selector(QSPauseLayer::onQuickSwitchNoop));
         btn->setID("quick-switch-hold-button"_spr);
+
+        auto timer = HoldTimer::create(
+            qs::frameSprite({"GJ_playBtn2_001.png"}),
+            qs::holdTime(),
+            []() { qs::requestSwitch(); },
+            kScale
+        );
+        if (timer) {
+            timer->setID("hold-timer"_spr);
+            auto size = btn->getContentSize();
+            timer->setPosition(ccp(size.width / 2.f, size.height / 2.f));
+            btn->addChild(timer, 10);
+        }
 
         if (auto menu = this->getChildByID("center-button-menu")) {
             // Chèn vào đầu hàng nút giữa (bên trái nút practice)
