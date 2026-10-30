@@ -1,5 +1,6 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/LevelInfoLayer.hpp>
+#include <Geode/modify/LevelPage.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/CCMenuItemSpriteExtra.hpp>
 #include <Geode/modify/CCDirector.hpp>
@@ -8,26 +9,116 @@
 #include <Geode/ui/Notification.hpp>
 #include <algorithm>
 #include <functional>
+#include <map>
+#include <sstream>
 #include <string>
+#include <vector>
 
 using namespace geode::prelude;
 
 // ---------------------------------------------------------------------------
-// Dữ liệu lưu giữa các lần mở game
+// Dữ liệu: mỗi level (nguồn) có một level đích riêng
 // ---------------------------------------------------------------------------
 namespace qs {
-    int targetId() { return Mod::get()->getSavedValue<int>("target-level-id", 0); }
-    std::string targetName() { return Mod::get()->getSavedValue<std::string>("target-level-name", ""); }
+    struct Target {
+        char type = 0;   // 'm' = level chính thức của RobTop, 'o' = level online
+        int id = 0;
+        std::string name;
+        bool valid() const { return type != 0 && id > 0; }
+    };
+
+    std::string keyOf(char type, int id) { return std::string(1, type) + std::to_string(id); }
+    std::string keyOf(Target const& t) { return keyOf(t.type, t.id); }
+
+    // Chuyển một GJGameLevel thành Target. Level tự tạo trong máy (không có ID) không hỗ trợ.
+    Target fromLevel(GJGameLevel* level) {
+        Target t;
+        if (!level) return t;
+        int id = level->m_levelID.value();
+        if (id <= 0) return t;
+        t.id = id;
+        t.type = (level->m_levelType == GJLevelType::Local) ? 'm' : 'o';
+        t.name = std::string(level->m_levelName);
+        return t;
+    }
+
+    std::string shorten(std::string s, size_t maxLen = 26) {
+        if (s.size() > maxLen) s = s.substr(0, maxLen) + "...";
+        return s;
+    }
+
+    // --- cài đặt chung ---
     float holdTime() { return static_cast<float>(Mod::get()->getSavedValue<double>("hold-time", 0.5)); }
     bool warn() { return Mod::get()->getSavedValue<bool>("warn-switch", false); }
-
-    void setTarget(int id, std::string const& name) {
-        Mod::get()->setSavedValue<int>("target-level-id", id);
-        Mod::get()->setSavedValue<std::string>("target-level-name", name);
-    }
-    void clearTarget() { setTarget(0, ""); }
     void setHoldTime(float t) { Mod::get()->setSavedValue<double>("hold-time", t); }
     void setWarn(bool b) { Mod::get()->setSavedValue<bool>("warn-switch", b); }
+
+    // --- bảng level nguồn -> level đích (lưu dạng văn bản: key \t type \t id \t name) ---
+    std::vector<std::string> splitTabs(std::string const& line) {
+        std::vector<std::string> parts;
+        std::string cur;
+        for (char c : line) {
+            if (c == '\t') {
+                parts.push_back(cur);
+                cur.clear();
+            } else {
+                cur += c;
+            }
+        }
+        parts.push_back(cur);
+        return parts;
+    }
+
+    std::map<std::string, Target> loadTargets() {
+        std::map<std::string, Target> out;
+        std::istringstream in(Mod::get()->getSavedValue<std::string>("level-targets", std::string()));
+        std::string line;
+        while (std::getline(in, line)) {
+            auto parts = splitTabs(line);
+            if (parts.size() < 4 || parts[1].empty()) continue;
+            Target t;
+            t.type = parts[1][0];
+            try { t.id = std::stoi(parts[2]); } catch (...) { continue; }
+            t.name = parts[3];
+            if (t.valid()) out[parts[0]] = t;
+        }
+        return out;
+    }
+
+    void saveTargets(std::map<std::string, Target> const& targets) {
+        std::string text;
+        for (auto const& [key, t] : targets) {
+            std::string name = t.name;
+            for (auto& c : name) {
+                if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+            }
+            text += key + "\t" + std::string(1, t.type) + "\t" + std::to_string(t.id) + "\t" + name + "\n";
+        }
+        Mod::get()->setSavedValue<std::string>("level-targets", text);
+    }
+
+    Target getTargetFor(std::string const& sourceKey) {
+        auto targets = loadTargets();
+        auto it = targets.find(sourceKey);
+        return it != targets.end() ? it->second : Target{};
+    }
+
+    void setTargetFor(std::string const& sourceKey, Target const& t) {
+        auto targets = loadTargets();
+        targets[sourceKey] = t;
+        saveTargets(targets);
+    }
+
+    void removeTargetFor(std::string const& sourceKey) {
+        auto targets = loadTargets();
+        targets.erase(sourceKey);
+        saveTargets(targets);
+    }
+
+    // Level vừa rời đi bằng nút chuyển: khi đang ở level `g_returnKey` mà level đó chưa có
+    // level đích riêng thì giữ nút sẽ quay về `g_returnTarget`. Chỉ lưu trong phiên chơi.
+    std::string g_returnKey;
+    Target g_returnTarget;
 
     // Lấy sprite từ frame có sẵn trong game, thử lần lượt từng tên.
     CCSprite* frameSprite(std::initializer_list<char const*> names) {
@@ -94,59 +185,31 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Chuyển sang level đã chọn
+// Màn hình loading riêng: thay cho màn hình sảnh khi thoát level để chuyển level
 // ---------------------------------------------------------------------------
+namespace qs {
+    enum class SwitchState { Idle, Quitting, Loading };
+    SwitchState g_state = SwitchState::Idle;
+    Ref<GJGameLevel> g_pending;
+}
 
-// Màn hình loading phủ kín, giữ nguyên qua các lần đổi scene (che màn hình sảnh).
-class LoadingOverlay : public CCLayerColor {
+// Nằm trong màn loading: chờ game thoát hẳn level cũ rồi mới dựng level mới.
+class LoadingRunner : public CCNode {
 protected:
-    CCSprite* m_spinner = nullptr; // có thể null nếu không tìm thấy texture
-    CCLabelBMFont* m_label = nullptr;
-    bool m_dismissing = false;
-    bool m_usesNotificationNode = false;
+    Ref<GJGameLevel> m_level;
+    int m_frames = 0;
 
-    bool init() override {
-        if (!CCLayerColor::initWithColor(ccc4(0, 0, 0, 255))) return false;
-
-        auto win = CCDirector::get()->getWinSize();
-
-        m_spinner = CCSprite::create("loadingCircle.png");
-        if (m_spinner) {
-            m_spinner->setScale(0.6f);
-            m_spinner->setPosition(ccp(win.width / 2.f, win.height / 2.f + 14.f));
-            m_spinner->runAction(CCRepeatForever::create(CCRotateBy::create(1.f, 360.f)));
-            this->addChild(m_spinner);
-        }
-
-        m_label = CCLabelBMFont::create("Loading level...", "goldFont.fnt");
-        m_label->setScale(0.7f);
-        m_label->setPosition(ccp(win.width / 2.f, win.height / 2.f - 22.f));
-        this->addChild(m_label);
-
-        this->setTouchEnabled(true); // chặn cú chạm xuyên xuống các layer bên dưới
+    bool init(GJGameLevel* level) {
+        if (!CCNode::init()) return false;
+        m_level = level;
+        this->scheduleUpdate();
         return true;
     }
 
-    void registerWithTouchDispatcher() override {
-        CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -9999, true);
-    }
-
-    void onFaded() {
-        if (m_usesNotificationNode) {
-            // Gỡ khỏi director một cách an toàn (không để bị huỷ ngay trong lúc đang chạy action)
-            this->retain();
-            this->onExit();
-            CCDirector::get()->setNotificationNode(nullptr);
-            this->autorelease();
-        } else {
-            this->removeFromParentAndCleanup(true);
-        }
-    }
-
 public:
-    static LoadingOverlay* create() {
-        auto ret = new LoadingOverlay();
-        if (ret->init()) {
+    static LoadingRunner* create(GJGameLevel* level) {
+        auto ret = new LoadingRunner();
+        if (ret->init(level)) {
             ret->autorelease();
             return ret;
         }
@@ -154,43 +217,66 @@ public:
         return nullptr;
     }
 
-    bool ccTouchBegan(CCTouch*, CCEvent*) override { return true; }
+    void update(float) override {
+        m_frames++;
+        auto director = CCDirector::get();
+        bool busy = PlayLayer::get() != nullptr
+            || typeinfo_cast<CCTransitionScene*>(director->getRunningScene()) != nullptr;
+        if (busy && m_frames < 300) return;
 
-    void setUsesNotificationNode(bool value) { m_usesNotificationNode = value; }
-    bool usesNotificationNode() const { return m_usesNotificationNode; }
+        this->unscheduleUpdate();
+        qs::g_state = qs::SwitchState::Idle;
+        qs::g_pending = nullptr;
 
-    // Hiện dần
-    void fadeInNow() {
-        this->setOpacity(0);
-        m_label->setOpacity(0);
-        this->runAction(CCFadeIn::create(0.2f));
-        m_label->runAction(CCFadeIn::create(0.2f));
-        if (m_spinner) {
-            m_spinner->setOpacity(0);
-            m_spinner->runAction(CCFadeIn::create(0.2f));
-        }
-    }
-
-    // Mờ dần rồi tự xoá sau `delay` giây
-    void dismiss(float delay) {
-        if (m_dismissing) return;
-        m_dismissing = true;
-        this->setTouchEnabled(false);
-
-        this->runAction(CCSequence::create(
-            CCDelayTime::create(delay),
-            CCFadeOut::create(0.3f),
-            CCCallFunc::create(this, callfunc_selector(LoadingOverlay::onFaded)),
-            nullptr
-        ));
-        m_label->runAction(CCSequence::create(CCDelayTime::create(delay), CCFadeOut::create(0.3f), nullptr));
-        if (m_spinner) {
-            m_spinner->runAction(CCSequence::create(CCDelayTime::create(delay), CCFadeOut::create(0.3f), nullptr));
-        }
+        auto scene = PlayLayer::scene(m_level, false, false);
+        director->replaceScene(CCTransitionFade::create(0.3f, scene));
     }
 };
 
+namespace qs {
+    CCScene* makeLoadingScene(GJGameLevel* level) {
+        auto scene = CCScene::create();
+        auto win = CCDirector::get()->getWinSize();
 
+        auto bg = CCLayerColor::create(ccc4(0, 0, 0, 255));
+        scene->addChild(bg);
+
+        if (auto spinner = CCSprite::create("loadingCircle.png")) {
+            spinner->setScale(0.6f);
+            spinner->setPosition(ccp(win.width / 2.f, win.height / 2.f + 14.f));
+            spinner->runAction(CCRepeatForever::create(CCRotateBy::create(1.f, 360.f)));
+            scene->addChild(spinner);
+        }
+
+        auto label = CCLabelBMFont::create("Loading level...", "goldFont.fnt");
+        label->setScale(0.7f);
+        label->setPosition(ccp(win.width / 2.f, win.height / 2.f - 22.f));
+        scene->addChild(label);
+
+        if (auto runner = LoadingRunner::create(level)) {
+            scene->addChild(runner);
+        }
+        return scene;
+    }
+}
+
+// Khi đang chuyển level, scene mà game định vào sau khi thoát level (màn sảnh...) được thay
+// bằng màn loading, nên không bao giờ thấy màn sảnh.
+class $modify(QSDirector, CCDirector) {
+    void replaceScene(CCScene* scene) {
+        if (qs::g_state == qs::SwitchState::Quitting && qs::g_pending) {
+            qs::g_state = qs::SwitchState::Loading;
+            auto loading = qs::makeLoadingScene(qs::g_pending);
+            CCDirector::replaceScene(CCTransitionFade::create(0.3f, loading));
+            return;
+        }
+        CCDirector::replaceScene(scene);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Chuyển sang level đích
+// ---------------------------------------------------------------------------
 namespace qs {
     // Tìm PauseLayer đang hiển thị (nằm trong scene hiện tại, tối đa 2 cấp)
     PauseLayer* findPause(CCNode* node, int depth = 0) {
@@ -204,110 +290,82 @@ namespace qs {
         return nullptr;
     }
 
-    Ref<LoadingOverlay> g_overlay;
-
-    void showLoading() {
-        if (g_overlay) return;
-        auto director = CCDirector::get();
-        auto overlay = LoadingOverlay::create();
-        if (!overlay) return;
-
-        if (!director->getNotificationNode()) {
-            // Cách chính: gắn vào "notification node" của director. Node này được vẽ đè lên
-            // MỌI scene (kể cả lúc đang chuyển cảnh) nên màn loading luôn che kín.
-            director->setNotificationNode(overlay);
-            overlay->setUsesNotificationNode(true);
-            overlay->onEnter();
-            overlay->onEnterTransitionDidFinish();
-        } else if (auto scene = director->getRunningScene()) {
-            // Dự phòng nếu notification node đã bị dùng: gắn vào scene hiện tại
-            scene->addChild(overlay, 99999);
-        } else {
-            return;
-        }
-        overlay->fadeInNow();
-        g_overlay = overlay;
-    }
-
-    void hideLoading(float delay) {
-        if (g_overlay) {
-            g_overlay->dismiss(delay);
-            g_overlay = nullptr;
-        }
-    }
-
-    // Đợi tới khi game đã thoát hẳn level cũ (PlayLayer cũ bị huỷ, hết hiệu ứng chuyển cảnh)
-    // rồi mới tạo PlayLayer mới. Mỗi frame kiểm tra một lần.
-    void waitAndPlay(Ref<GJGameLevel> level, int frames, bool leaving) {
-        Loader::get()->queueInMainThread([level, frames, leaving]() {
-            auto director = CCDirector::get();
-            bool inTransition = typeinfo_cast<CCTransitionScene*>(director->getRunningScene()) != nullptr;
-            bool playLayerAlive = PlayLayer::get() != nullptr;
-
-            if (playLayerAlive || inTransition) {
-                bool nowLeaving = leaving || inTransition;
-                // Nếu mãi không thoát được (ví dụ đang hiện hộp xác nhận thoát) thì huỷ để không kẹt
-                if ((!nowLeaving && frames > 120) || frames > 900) {
-                    hideLoading(0.f);
-                    return;
-                }
-                waitAndPlay(level, frames + 1, nowLeaving);
+    // Nếu game không thoát level (ví dụ đang hiện hộp xác nhận thoát) thì huỷ sau ~10 giây.
+    void pollQuit(int frames) {
+        Loader::get()->queueInMainThread([frames]() {
+            if (g_state != SwitchState::Quitting) return;
+            if (frames > 600) {
+                g_state = SwitchState::Idle;
+                g_pending = nullptr;
                 return;
             }
-
-            // Level cũ đã bị huỷ hẳn: vào level mới (không dùng hiệu ứng, màn loading đang che)
-            auto scene = PlayLayer::scene(level, false, false);
-            director->replaceScene(scene);
-
-            // Sang frame sau mới cho màn loading mờ dần (lúc đó nó đã được chuyển sang scene mới)
-            Loader::get()->queueInMainThread([]() { hideLoading(0.35f); });
+            pollQuit(frames + 1);
         });
     }
 
     void startLevel(GJGameLevel* level) {
-        // Bật màn hình loading che toàn bộ quá trình.
-        showLoading();
+        auto pause = findPause(CCDirector::get()->getRunningScene());
+        auto playLayer = PlayLayer::get();
+        if (!pause && !playLayer) return;
 
-        // Thoát level hiện tại bằng đúng đường thoát của game (nút Exit trong menu tạm dừng),
-        // để mọi mod khác dọn dẹp bình thường. Sau đó mới vào level mới.
-        if (auto pause = findPause(CCDirector::get()->getRunningScene())) {
+        g_pending = level;
+        g_state = SwitchState::Quitting;
+
+        // Thoát level bằng đúng đường thoát của game để mọi mod khác dọn dẹp bình thường.
+        // Lúc game định chuyển về màn sảnh, hook QSDirector sẽ đổi sang màn loading.
+        if (pause) {
             pause->onQuit(nullptr);
-        } else if (auto playLayer = PlayLayer::get()) {
+        } else {
             playLayer->onQuit();
         }
-        waitAndPlay(level, 0, false);
+        pollQuit(0);
+    }
+
+    // Trả về true nếu phải tải qua mạng (bất đồng bộ)
+    bool loadTarget(Target const& t, std::function<void(GJGameLevel*)> onDone, std::function<void()> onFail) {
+        if (t.type == 'm') {
+            auto level = GameLevelManager::get()->getMainLevel(t.id, false);
+            if (level) onDone(level); else onFail();
+            return false;
+        }
+        return LevelFetcher::fetch(t.id, std::move(onDone), std::move(onFail));
     }
 
     void switchToTarget() {
-        if (g_overlay) return; // đang chuyển level rồi
-        int id = targetId();
-        if (id <= 0) {
-            Notification::create("No level selected. Use the + button in the level page.", NotificationIcon::Warning)->show();
+        if (g_state != SwitchState::Idle) return;
+
+        auto playLayer = PlayLayer::get();
+        Target cur = (playLayer && playLayer->m_level) ? fromLevel(playLayer->m_level) : Target{};
+        if (!cur.valid()) {
+            Notification::create("This level type is not supported (only official and online levels)", NotificationIcon::Warning)->show();
+            return;
+        }
+        std::string curKey = keyOf(cur);
+
+        // Ưu tiên level đích do người chơi đặt riêng cho level này;
+        // nếu không có thì quay về level vừa rời đi bằng nút chuyển.
+        Target target = getTargetFor(curKey);
+        if (!target.valid() && g_returnKey == curKey && g_returnTarget.valid()) {
+            target = g_returnTarget;
+        }
+        if (!target.valid()) {
+            Notification::create("No level set for this one. Open its level page and press +", NotificationIcon::Warning)->show();
+            return;
+        }
+        if (keyOf(target) == curKey) {
+            Notification::create("You are already playing that level", NotificationIcon::Warning)->show();
             return;
         }
 
-        // Ghi nhớ level đang chơi để lần giữ nút tiếp theo quay lại được level này.
-        int curId = 0;
-        std::string curName;
-        if (auto pl = PlayLayer::get(); pl && pl->m_level) {
-            curId = pl->m_level->m_levelID.value();
-            curName = std::string(pl->m_level->m_levelName);
-        }
-        if (curId == id) {
-            Notification::create("You are already playing the selected level", NotificationIcon::Warning)->show();
-            return;
-        }
-
-        bool async = LevelFetcher::fetch(
-            id,
-            [curId, curName, id](GJGameLevel* level) {
-                // Hoán đổi: level đang chơi trở thành level đích mới (chỉ khi nó là level online)
-                if (curId > 0 && curId != id) {
-                    setTarget(curId, curName);
-                }
+        bool async = loadTarget(
+            target,
+            [cur, target](GJGameLevel* level) {
+                // Nhớ đường về: từ level đích, nếu chưa có level đích riêng thì giữ nút sẽ quay lại level này
+                g_returnKey = keyOf(target);
+                g_returnTarget = cur;
                 startLevel(level);
             },
-            []() { Notification::create("Could not download the level", NotificationIcon::Error)->show(); }
+            []() { Notification::create("Could not load the level", NotificationIcon::Error)->show(); }
         );
         if (async) {
             Notification::create("Downloading level...", NotificationIcon::Loading)->show();
@@ -329,19 +387,6 @@ namespace qs {
         }
     }
 }
-
-// Mỗi lần game đổi scene, chuyển màn loading sang scene mới để nó không bị mất.
-class $modify(QSDirector, CCDirector) {
-    void willSwitchToScene(CCScene* scene) {
-        CCDirector::willSwitchToScene(scene);
-        if (qs::g_overlay && !qs::g_overlay->usesNotificationNode()
-            && scene && qs::g_overlay->getParent() != scene) {
-            qs::g_overlay->removeFromParentAndCleanup(false);
-            scene->addChild(qs::g_overlay, 99999);
-        }
-    }
-};
-
 
 // ---------------------------------------------------------------------------
 // Bộ đếm giữ nút (có vòng tiến trình). Được gắn làm con của một nút THẬT của game
@@ -425,91 +470,116 @@ class $modify(QSMenuItem, CCMenuItemSpriteExtra) {
 };
 
 // ---------------------------------------------------------------------------
-// Menu cài đặt: nhập ID level, thời gian giữ, cảnh báo
+// Menu cài đặt: level đích của MỘT level cụ thể, thời gian giữ, cảnh báo
 // ---------------------------------------------------------------------------
 class QuickSwitchPopup : public Popup {
 protected:
+    qs::Target m_src;
     TextInput* m_idInput = nullptr;
     TextInput* m_holdInput = nullptr;
     CCLabelBMFont* m_status = nullptr;
+    CCMenuItemToggler* m_officialToggle = nullptr;
     CCMenuItemToggler* m_warnToggle = nullptr;
     CCMenuItemSpriteExtra* m_okBtn = nullptr;
     bool m_busy = false;
 
-    bool init() {
-        if (!Popup::init(390.f, 230.f)) return false;
+    bool init(qs::Target const& src) {
+        if (!Popup::init(390.f, 250.f)) return false;
+        m_src = src;
         this->setTitle("Quick Level Switch");
+
+        auto existing = qs::getTargetFor(qs::keyOf(src));
+
+        // Level đang được cài đặt
+        auto forLabel = CCLabelBMFont::create(
+            fmt::format("For: {}", qs::shorten(src.name)).c_str(), "chatFont.fnt"
+        );
+        forLabel->setScale(0.7f);
+        m_mainLayer->addChildAtPosition(forLabel, Anchor::Center, ccp(0.f, 80.f));
 
         // Hàng 1: ô nhập ID, nút xoá, nút OK
         m_idInput = TextInput::create(170.f, "Enter level ID");
         m_idInput->setCommonFilter(CommonFilter::Uint);
         m_idInput->setMaxCharCount(10);
-        if (int id = qs::targetId(); id > 0) {
-            m_idInput->setString(std::to_string(id));
+        if (existing.valid()) {
+            m_idInput->setString(std::to_string(existing.id));
         }
-        m_mainLayer->addChildAtPosition(m_idInput, Anchor::Center, ccp(-45.f, 50.f));
+        m_mainLayer->addChildAtPosition(m_idInput, Anchor::Center, ccp(-45.f, 45.f));
 
         auto trashSpr = CCSprite::createWithSpriteFrameName("GJ_trashBtn_001.png");
         trashSpr->setScale(0.8f);
         auto trashBtn = CCMenuItemSpriteExtra::create(trashSpr, this, menu_selector(QuickSwitchPopup::onClear));
-        m_buttonMenu->addChildAtPosition(trashBtn, Anchor::Center, ccp(65.f, 50.f));
+        m_buttonMenu->addChildAtPosition(trashBtn, Anchor::Center, ccp(65.f, 45.f));
 
         auto okSpr = ButtonSprite::create("OK");
         m_okBtn = CCMenuItemSpriteExtra::create(okSpr, this, menu_selector(QuickSwitchPopup::onOk));
-        m_buttonMenu->addChildAtPosition(m_okBtn, Anchor::Center, ccp(135.f, 50.f));
+        m_buttonMenu->addChildAtPosition(m_okBtn, Anchor::Center, ccp(135.f, 45.f));
 
-        // Hàng 2: level đang được chọn
+        // Hàng 2: level chính thức của RobTop hay level online
+        m_officialToggle = CCMenuItemToggler::createWithStandardSprites(
+            this, menu_selector(QuickSwitchPopup::onNoop), 0.6f
+        );
+        m_officialToggle->toggle(existing.valid() && existing.type == 'm');
+        m_buttonMenu->addChildAtPosition(m_officialToggle, Anchor::Center, ccp(-165.f, 12.f));
+
+        auto officialLabel = CCLabelBMFont::create("Official level (Stereo Madness = 1, ...)", "chatFont.fnt");
+        officialLabel->setScale(0.65f);
+        officialLabel->setAnchorPoint(ccp(0.f, 0.5f));
+        m_mainLayer->addChildAtPosition(officialLabel, Anchor::Center, ccp(-148.f, 12.f));
+
+        // Hàng 3: level đích hiện tại
         m_status = CCLabelBMFont::create("", "chatFont.fnt");
         m_status->setScale(0.7f);
-        m_mainLayer->addChildAtPosition(m_status, Anchor::Center, ccp(0.f, 10.f));
+        m_mainLayer->addChildAtPosition(m_status, Anchor::Center, ccp(0.f, -15.f));
         this->refreshStatus();
 
-        // Hàng 3: thời gian giữ
+        // Hàng 4: thời gian giữ
         auto holdLabel = CCLabelBMFont::create("Hold time (seconds):", "chatFont.fnt");
         holdLabel->setScale(0.7f);
         holdLabel->setAnchorPoint(ccp(0.f, 0.5f));
-        m_mainLayer->addChildAtPosition(holdLabel, Anchor::Center, ccp(-170.f, -30.f));
+        m_mainLayer->addChildAtPosition(holdLabel, Anchor::Center, ccp(-170.f, -50.f));
 
         m_holdInput = TextInput::create(60.f, "0.5");
         m_holdInput->setCommonFilter(CommonFilter::Float);
         m_holdInput->setMaxCharCount(5);
         m_holdInput->setString(fmt::format("{:.2f}", qs::holdTime()));
-        m_mainLayer->addChildAtPosition(m_holdInput, Anchor::Center, ccp(-10.f, -30.f));
+        m_mainLayer->addChildAtPosition(m_holdInput, Anchor::Center, ccp(-10.f, -50.f));
 
-        // Hàng 4: checkbox cảnh báo
+        // Hàng 5: cảnh báo
         m_warnToggle = CCMenuItemToggler::createWithStandardSprites(
-            this, menu_selector(QuickSwitchPopup::onToggleWarn), 0.7f
+            this, menu_selector(QuickSwitchPopup::onNoop), 0.6f
         );
         m_warnToggle->toggle(qs::warn());
-        m_buttonMenu->addChildAtPosition(m_warnToggle, Anchor::Center, ccp(-165.f, -70.f));
+        m_buttonMenu->addChildAtPosition(m_warnToggle, Anchor::Center, ccp(-165.f, -88.f));
 
         auto warnLabel = CCLabelBMFont::create("Warn before switching levels", "chatFont.fnt");
         warnLabel->setScale(0.7f);
         warnLabel->setAnchorPoint(ccp(0.f, 0.5f));
-        m_mainLayer->addChildAtPosition(warnLabel, Anchor::Center, ccp(-145.f, -70.f));
+        m_mainLayer->addChildAtPosition(warnLabel, Anchor::Center, ccp(-148.f, -88.f));
 
         return true;
     }
 
     void refreshStatus() {
-        int id = qs::targetId();
+        auto existing = qs::getTargetFor(qs::keyOf(m_src));
         std::string text;
-        if (id > 0) {
-            auto name = qs::targetName();
-            if (name.size() > 24) name = name.substr(0, 24) + "...";
-            text = fmt::format("Selected: {} ({})", name, id);
+        if (existing.valid()) {
+            text = fmt::format(
+                "Selected: {} ({}{})", qs::shorten(existing.name, 22),
+                existing.type == 'm' ? "official " : "", existing.id
+            );
         } else {
             text = "No level selected";
         }
         m_status->setString(text.c_str());
     }
 
-    void onToggleWarn(CCObject*) {}
+    void onNoop(CCObject*) {}
 
     void onClear(CCObject*) {
         if (m_busy) return;
         m_idInput->setString("");
-        qs::clearTarget();
+        qs::removeTargetFor(qs::keyOf(m_src));
         this->refreshStatus();
     }
 
@@ -525,7 +595,7 @@ protected:
 
         std::string text = std::string(m_idInput->getString());
         if (text.empty()) {
-            qs::clearTarget();
+            qs::removeTargetFor(qs::keyOf(m_src));
             Notification::create("Settings saved", NotificationIcon::Success)->show();
             this->keyBackClicked();
             return;
@@ -538,23 +608,43 @@ protected:
             return;
         }
 
+        bool official = m_officialToggle->isToggled();
+        char type = official ? 'm' : 'o';
+        if (qs::keyOf(type, id) == qs::keyOf(m_src)) {
+            Notification::create("A level cannot switch to itself", NotificationIcon::Warning)->show();
+            return;
+        }
+
+        if (official) {
+            auto level = GameLevelManager::get()->getMainLevel(id, true);
+            if (!level || level->m_levelName.empty()) {
+                Notification::create("No official level with that ID", NotificationIcon::Error)->show();
+                return;
+            }
+            this->saveTarget(type, id, std::string(level->m_levelName));
+            return;
+        }
+
         m_busy = true;
         m_okBtn->setEnabled(false);
         m_status->setString("Loading level...");
 
         Ref<QuickSwitchPopup> self = this;
-        LevelFetcher::fetch(
-            id,
+        qs::loadTarget(
+            qs::Target{ type, id, "" },
             [self, id](GJGameLevel* level) { self->onLoaded(id, level); },
             [self]() { self->onFailed(); }
         );
     }
 
-    void onLoaded(int id, GJGameLevel* level) {
-        std::string name = std::string(level->m_levelName);
-        qs::setTarget(id, name);
+    void saveTarget(char type, int id, std::string const& name) {
+        qs::setTargetFor(qs::keyOf(m_src), qs::Target{ type, id, name });
         Notification::create(fmt::format("Saved: {}", name), NotificationIcon::Success)->show();
         this->keyBackClicked();
+    }
+
+    void onLoaded(int id, GJGameLevel* level) {
+        this->saveTarget('o', id, std::string(level->m_levelName));
     }
 
     void onFailed() {
@@ -565,9 +655,9 @@ protected:
     }
 
 public:
-    static QuickSwitchPopup* create() {
+    static QuickSwitchPopup* create(qs::Target const& src) {
         auto ret = new QuickSwitchPopup();
-        if (ret->init()) {
+        if (ret->init(src)) {
             ret->autorelease();
             return ret;
         }
@@ -576,8 +666,21 @@ public:
     }
 };
 
+namespace qs {
+    void openSettingsFor(GJGameLevel* level) {
+        auto src = fromLevel(level);
+        if (!src.valid()) {
+            Notification::create("This level type is not supported (only official and online levels)", NotificationIcon::Warning)->show();
+            return;
+        }
+        if (auto popup = QuickSwitchPopup::create(src)) {
+            popup->show();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Màn hình sảnh level: thêm nút dấu cộng
+// Màn hình sảnh level online: thêm nút dấu cộng
 // ---------------------------------------------------------------------------
 class $modify(QSLevelInfoLayer, LevelInfoLayer) {
     bool init(GJGameLevel* level, bool challenge) {
@@ -601,9 +704,61 @@ class $modify(QSLevelInfoLayer, LevelInfoLayer) {
     }
 
     void onQuickSwitch(CCObject*) {
-        if (auto popup = QuickSwitchPopup::create()) {
-            popup->show();
+        qs::openSettingsFor(m_level);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Màn hình chọn level chính thức: mỗi trang level có một nút dấu cộng đi theo trang
+// ---------------------------------------------------------------------------
+class $modify(QSLevelPage, LevelPage) {
+    bool init(GJGameLevel* level) {
+        if (!LevelPage::init(level)) return false;
+
+        auto winSize = CCDirector::get()->getWinSize();
+
+        auto spr = qs::frameSprite({"GJ_plusBtn_001.png"});
+        spr->setScale(0.8f);
+        auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(QSLevelPage::onQuickSwitch));
+        btn->setID("quick-switch-button"_spr);
+
+        // Góc trên bên trái của khung level, tính trong toạ độ của trang
+        CCPoint pagePos = ccp(winSize.width / 2.f - 197.f, 247.f);
+
+        if (m_levelMenu) {
+            // Đổi sang toạ độ của menu có sẵn của trang (nút trong menu này nhận cú chạm bình thường
+            // khi trang đang được cuộn)
+            auto world = this->convertToWorldSpace(pagePos);
+            btn->setPosition(m_levelMenu->convertToNodeSpace(world));
+            m_levelMenu->addChild(btn);
+        } else {
+            auto menu = CCMenu::create();
+            menu->setPosition(CCPointZero);
+            btn->setPosition(pagePos);
+            menu->addChild(btn);
+            this->addChild(menu, 10);
         }
+
+        this->refreshQuickSwitch();
+        return true;
+    }
+
+    void updateDynamicPage(GJGameLevel* level) {
+        LevelPage::updateDynamicPage(level);
+        this->refreshQuickSwitch();
+    }
+
+    // Chỉ hiện dấu cộng ở các trang là level chính thức (không hiện ở trang "The Tower"...)
+    void refreshQuickSwitch() {
+        auto node = m_levelMenu ? m_levelMenu->getChildByID("quick-switch-button"_spr) : nullptr;
+        if (!node) node = this->getChildByIDRecursive("quick-switch-button"_spr);
+        if (!node) return;
+        auto t = qs::fromLevel(m_level);
+        node->setVisible(t.valid() && t.type == 'm' && t.id >= 1 && t.id <= 22);
+    }
+
+    void onQuickSwitch(CCObject*) {
+        qs::openSettingsFor(m_level);
     }
 };
 
