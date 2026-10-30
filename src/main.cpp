@@ -227,6 +227,7 @@ public:
         if (busy && m_frames < 300) return;
 
         this->unscheduleUpdate();
+        log::info("[QuickLevelSwitch] LoadingRunner: building new level after {} frames", m_frames);
         qs::g_state = qs::SwitchState::Idle;
         qs::g_pending = nullptr;
 
@@ -267,6 +268,7 @@ namespace qs {
 class $modify(QSDirector, CCDirector) {
     void replaceScene(CCScene* scene) {
         if (qs::g_state == qs::SwitchState::Quitting && qs::g_pending) {
+            log::info("[QuickLevelSwitch] replaceScene intercepted, showing loading scene");
             qs::g_state = qs::SwitchState::Loading;
             auto loading = qs::makeLoadingScene(qs::g_pending);
             CCDirector::replaceScene(CCTransitionFade::create(0.3f, loading));
@@ -302,12 +304,14 @@ namespace qs {
 
             auto director = CCDirector::get();
             if (g_pending && director->getRunningScene() != g_oldScene) {
+                log::info("[QuickLevelSwitch] game started leaving the level (after {} frames), showing loading scene", frames);
                 g_state = SwitchState::Loading;
                 director->replaceScene(makeLoadingScene(g_pending));
                 return;
             }
 
             if (frames > 600) {
+                log::info("[QuickLevelSwitch] timed out waiting for the game to leave the level");
                 g_state = SwitchState::Idle;
                 g_pending = nullptr;
                 return;
@@ -319,6 +323,7 @@ namespace qs {
     void startLevel(GJGameLevel* level) {
         auto pause = findPause(CCDirector::get()->getRunningScene());
         auto playLayer = PlayLayer::get();
+        log::info("[QuickLevelSwitch] startLevel: pauseLayer found={}, playLayer found={}", pause != nullptr, playLayer != nullptr);
         if (!pause && !playLayer) return;
 
         g_pending = level;
@@ -371,6 +376,7 @@ namespace qs {
             return;
         }
 
+        log::info("[QuickLevelSwitch] switching from {} to {}", curKey, keyOf(target));
         bool async = loadTarget(
             target,
             [cur, target](GJGameLevel* level) {
