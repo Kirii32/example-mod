@@ -5,6 +5,8 @@
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/ui/Notification.hpp>
+#include <Geode/ui/SceneManager.hpp>
+#include <Geode/ui/LoadingSpinner.hpp>
 #include <algorithm>
 #include <functional>
 #include <string>
@@ -96,6 +98,82 @@ public:
 // Chuyển sang level đã chọn
 // ---------------------------------------------------------------------------
 
+// Màn hình loading phủ kín, giữ nguyên qua các lần đổi scene (che màn hình sảnh).
+class LoadingOverlay : public CCLayerColor {
+protected:
+    LoadingSpinner* m_spinner = nullptr;
+    CCLabelBMFont* m_label = nullptr;
+    bool m_dismissing = false;
+
+    bool init() override {
+        if (!CCLayerColor::initWithColor(ccc4(0, 0, 0, 255))) return false;
+
+        auto win = CCDirector::get()->getWinSize();
+
+        m_spinner = LoadingSpinner::create(36.f);
+        m_spinner->setPosition(ccp(win.width / 2.f, win.height / 2.f + 14.f));
+        this->addChild(m_spinner);
+
+        m_label = CCLabelBMFont::create("Loading level...", "goldFont.fnt");
+        m_label->setScale(0.7f);
+        m_label->setPosition(ccp(win.width / 2.f, win.height / 2.f - 22.f));
+        this->addChild(m_label);
+
+        this->setTouchEnabled(true); // chặn cú chạm xuyên xuống các layer bên dưới
+        return true;
+    }
+
+    void registerWithTouchDispatcher() override {
+        CCDirector::get()->getTouchDispatcher()->addTargetedDelegate(this, -9999, true);
+    }
+
+    void onFaded() {
+        this->removeFromParentAndCleanup(true);
+    }
+
+public:
+    static LoadingOverlay* create() {
+        auto ret = new LoadingOverlay();
+        if (ret->init()) {
+            ret->autorelease();
+            return ret;
+        }
+        delete ret;
+        return nullptr;
+    }
+
+    bool ccTouchBegan(CCTouch*, CCEvent*) override { return true; }
+
+    // Hiện dần
+    void fadeInNow() {
+        m_spinner->setCascadeOpacityEnabled(true);
+        this->setOpacity(0);
+        m_label->setOpacity(0);
+        m_spinner->setOpacity(0);
+        this->runAction(CCFadeIn::create(0.2f));
+        m_label->runAction(CCFadeIn::create(0.2f));
+        m_spinner->runAction(CCFadeIn::create(0.2f));
+    }
+
+    // Mờ dần rồi tự xoá sau `delay` giây
+    void dismiss(float delay) {
+        if (m_dismissing) return;
+        m_dismissing = true;
+        SceneManager::get()->forget(this);
+        this->setTouchEnabled(false);
+
+        this->runAction(CCSequence::create(
+            CCDelayTime::create(delay),
+            CCFadeOut::create(0.3f),
+            CCCallFunc::create(this, callfunc_selector(LoadingOverlay::onFaded)),
+            nullptr
+        ));
+        m_label->runAction(CCSequence::create(CCDelayTime::create(delay), CCFadeOut::create(0.3f), nullptr));
+        m_spinner->runAction(CCSequence::create(CCDelayTime::create(delay), CCFadeOut::create(0.3f), nullptr));
+    }
+};
+
+
 namespace qs {
     // Tìm PauseLayer đang hiển thị (nằm trong scene hiện tại, tối đa 2 cấp)
     PauseLayer* findPause(CCNode* node, int depth = 0) {
@@ -109,23 +187,58 @@ namespace qs {
         return nullptr;
     }
 
+    Ref<LoadingOverlay> g_overlay;
+
+    void showLoading() {
+        auto scene = CCDirector::get()->getRunningScene();
+        if (!scene || g_overlay) return;
+        auto overlay = LoadingOverlay::create();
+        if (!overlay) return;
+        scene->addChild(overlay, 99999);
+        SceneManager::get()->keepAcrossScenes(overlay);
+        overlay->fadeInNow();
+        g_overlay = overlay;
+    }
+
+    void hideLoading(float delay) {
+        if (g_overlay) {
+            g_overlay->dismiss(delay);
+            g_overlay = nullptr;
+        }
+    }
+
     // Đợi tới khi game đã thoát hẳn level cũ (PlayLayer cũ bị huỷ, hết hiệu ứng chuyển cảnh)
-    // rồi mới tạo PlayLayer mới. Mỗi frame kiểm tra một lần, tối đa ~10 giây.
-    void waitAndPlay(Ref<GJGameLevel> level, int frames) {
-        Loader::get()->queueInMainThread([level, frames]() {
+    // rồi mới tạo PlayLayer mới. Mỗi frame kiểm tra một lần.
+    void waitAndPlay(Ref<GJGameLevel> level, int frames, bool leaving) {
+        Loader::get()->queueInMainThread([level, frames, leaving]() {
             auto director = CCDirector::get();
-            bool busy = PlayLayer::get() != nullptr
-                || typeinfo_cast<CCTransitionScene*>(director->getRunningScene()) != nullptr;
-            if (busy) {
-                if (frames < 600) waitAndPlay(level, frames + 1);
-                return; // quá thời gian chờ thì bỏ qua
+            bool inTransition = typeinfo_cast<CCTransitionScene*>(director->getRunningScene()) != nullptr;
+            bool playLayerAlive = PlayLayer::get() != nullptr;
+
+            if (playLayerAlive || inTransition) {
+                bool nowLeaving = leaving || inTransition;
+                // Nếu mãi không thoát được (ví dụ đang hiện hộp xác nhận thoát) thì huỷ để không kẹt
+                if ((!nowLeaving && frames > 120) || frames > 900) {
+                    hideLoading(0.f);
+                    return;
+                }
+                waitAndPlay(level, frames + 1, nowLeaving);
+                return;
             }
+
+            // Level cũ đã bị huỷ hẳn: vào level mới (không dùng hiệu ứng, màn loading đang che)
             auto scene = PlayLayer::scene(level, false, false);
-            director->replaceScene(CCTransitionFade::create(0.4f, scene));
+            director->replaceScene(scene);
+
+            // Sang frame sau mới cho màn loading mờ dần (lúc đó nó đã được chuyển sang scene mới)
+            Loader::get()->queueInMainThread([]() { hideLoading(0.35f); });
         });
     }
 
     void startLevel(GJGameLevel* level) {
+        // Bật màn hình loading che toàn bộ quá trình.
+        showLoading();
+
         // Thoát level hiện tại bằng đúng đường thoát của game (nút Exit trong menu tạm dừng),
         // để mọi mod khác dọn dẹp bình thường. Sau đó mới vào level mới.
         if (auto pause = findPause(CCDirector::get()->getRunningScene())) {
@@ -133,10 +246,11 @@ namespace qs {
         } else if (auto playLayer = PlayLayer::get()) {
             playLayer->onQuit();
         }
-        waitAndPlay(level, 0);
+        waitAndPlay(level, 0, false);
     }
 
     void switchToTarget() {
+        if (g_overlay) return; // đang chuyển level rồi
         int id = targetId();
         if (id <= 0) {
             Notification::create("No level selected. Use the + button in the level page.", NotificationIcon::Warning)->show();
