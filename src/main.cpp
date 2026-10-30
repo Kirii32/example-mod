@@ -2,11 +2,10 @@
 #include <Geode/modify/LevelInfoLayer.hpp>
 #include <Geode/modify/PauseLayer.hpp>
 #include <Geode/modify/CCMenuItemSpriteExtra.hpp>
+#include <Geode/modify/CCDirector.hpp>
 #include <Geode/ui/Popup.hpp>
 #include <Geode/ui/TextInput.hpp>
 #include <Geode/ui/Notification.hpp>
-#include <Geode/ui/SceneManager.hpp>
-#include <Geode/ui/LoadingSpinner.hpp>
 #include <algorithm>
 #include <functional>
 #include <string>
@@ -101,7 +100,7 @@ public:
 // Màn hình loading phủ kín, giữ nguyên qua các lần đổi scene (che màn hình sảnh).
 class LoadingOverlay : public CCLayerColor {
 protected:
-    LoadingSpinner* m_spinner = nullptr;
+    CCSprite* m_spinner = nullptr; // có thể null nếu không tìm thấy texture
     CCLabelBMFont* m_label = nullptr;
     bool m_dismissing = false;
 
@@ -110,9 +109,13 @@ protected:
 
         auto win = CCDirector::get()->getWinSize();
 
-        m_spinner = LoadingSpinner::create(36.f);
-        m_spinner->setPosition(ccp(win.width / 2.f, win.height / 2.f + 14.f));
-        this->addChild(m_spinner);
+        m_spinner = CCSprite::create("loadingCircle.png");
+        if (m_spinner) {
+            m_spinner->setScale(0.6f);
+            m_spinner->setPosition(ccp(win.width / 2.f, win.height / 2.f + 14.f));
+            m_spinner->runAction(CCRepeatForever::create(CCRotateBy::create(1.f, 360.f)));
+            this->addChild(m_spinner);
+        }
 
         m_label = CCLabelBMFont::create("Loading level...", "goldFont.fnt");
         m_label->setScale(0.7f);
@@ -146,20 +149,20 @@ public:
 
     // Hiện dần
     void fadeInNow() {
-        m_spinner->setCascadeOpacityEnabled(true);
         this->setOpacity(0);
         m_label->setOpacity(0);
-        m_spinner->setOpacity(0);
         this->runAction(CCFadeIn::create(0.2f));
         m_label->runAction(CCFadeIn::create(0.2f));
-        m_spinner->runAction(CCFadeIn::create(0.2f));
+        if (m_spinner) {
+            m_spinner->setOpacity(0);
+            m_spinner->runAction(CCFadeIn::create(0.2f));
+        }
     }
 
     // Mờ dần rồi tự xoá sau `delay` giây
     void dismiss(float delay) {
         if (m_dismissing) return;
         m_dismissing = true;
-        SceneManager::get()->forget(this);
         this->setTouchEnabled(false);
 
         this->runAction(CCSequence::create(
@@ -169,7 +172,9 @@ public:
             nullptr
         ));
         m_label->runAction(CCSequence::create(CCDelayTime::create(delay), CCFadeOut::create(0.3f), nullptr));
-        m_spinner->runAction(CCSequence::create(CCDelayTime::create(delay), CCFadeOut::create(0.3f), nullptr));
+        if (m_spinner) {
+            m_spinner->runAction(CCSequence::create(CCDelayTime::create(delay), CCFadeOut::create(0.3f), nullptr));
+        }
     }
 };
 
@@ -195,7 +200,6 @@ namespace qs {
         auto overlay = LoadingOverlay::create();
         if (!overlay) return;
         scene->addChild(overlay, 99999);
-        SceneManager::get()->keepAcrossScenes(overlay);
         overlay->fadeInNow();
         g_overlay = overlay;
     }
@@ -300,6 +304,18 @@ namespace qs {
         }
     }
 }
+
+// Mỗi lần game đổi scene, chuyển màn loading sang scene mới để nó không bị mất.
+class $modify(QSDirector, CCDirector) {
+    void willSwitchToScene(CCScene* scene) {
+        CCDirector::willSwitchToScene(scene);
+        if (qs::g_overlay && scene && qs::g_overlay->getParent() != scene) {
+            qs::g_overlay->removeFromParentAndCleanup(false);
+            scene->addChild(qs::g_overlay, 99999);
+        }
+    }
+};
+
 
 // ---------------------------------------------------------------------------
 // Bộ đếm giữ nút (có vòng tiến trình). Được gắn làm con của một nút THẬT của game
