@@ -103,6 +103,7 @@ protected:
     CCSprite* m_spinner = nullptr; // có thể null nếu không tìm thấy texture
     CCLabelBMFont* m_label = nullptr;
     bool m_dismissing = false;
+    bool m_usesNotificationNode = false;
 
     bool init() override {
         if (!CCLayerColor::initWithColor(ccc4(0, 0, 0, 255))) return false;
@@ -131,7 +132,15 @@ protected:
     }
 
     void onFaded() {
-        this->removeFromParentAndCleanup(true);
+        if (m_usesNotificationNode) {
+            // Gỡ khỏi director một cách an toàn (không để bị huỷ ngay trong lúc đang chạy action)
+            this->retain();
+            this->onExit();
+            CCDirector::get()->setNotificationNode(nullptr);
+            this->autorelease();
+        } else {
+            this->removeFromParentAndCleanup(true);
+        }
     }
 
 public:
@@ -146,6 +155,9 @@ public:
     }
 
     bool ccTouchBegan(CCTouch*, CCEvent*) override { return true; }
+
+    void setUsesNotificationNode(bool value) { m_usesNotificationNode = value; }
+    bool usesNotificationNode() const { return m_usesNotificationNode; }
 
     // Hiện dần
     void fadeInNow() {
@@ -195,11 +207,24 @@ namespace qs {
     Ref<LoadingOverlay> g_overlay;
 
     void showLoading() {
-        auto scene = CCDirector::get()->getRunningScene();
-        if (!scene || g_overlay) return;
+        if (g_overlay) return;
+        auto director = CCDirector::get();
         auto overlay = LoadingOverlay::create();
         if (!overlay) return;
-        scene->addChild(overlay, 99999);
+
+        if (!director->getNotificationNode()) {
+            // Cách chính: gắn vào "notification node" của director. Node này được vẽ đè lên
+            // MỌI scene (kể cả lúc đang chuyển cảnh) nên màn loading luôn che kín.
+            director->setNotificationNode(overlay);
+            overlay->setUsesNotificationNode(true);
+            overlay->onEnter();
+            overlay->onEnterTransitionDidFinish();
+        } else if (auto scene = director->getRunningScene()) {
+            // Dự phòng nếu notification node đã bị dùng: gắn vào scene hiện tại
+            scene->addChild(overlay, 99999);
+        } else {
+            return;
+        }
         overlay->fadeInNow();
         g_overlay = overlay;
     }
@@ -309,7 +334,8 @@ namespace qs {
 class $modify(QSDirector, CCDirector) {
     void willSwitchToScene(CCScene* scene) {
         CCDirector::willSwitchToScene(scene);
-        if (qs::g_overlay && scene && qs::g_overlay->getParent() != scene) {
+        if (qs::g_overlay && !qs::g_overlay->usesNotificationNode()
+            && scene && qs::g_overlay->getParent() != scene) {
             qs::g_overlay->removeFromParentAndCleanup(false);
             scene->addChild(qs::g_overlay, 99999);
         }
