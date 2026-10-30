@@ -192,6 +192,7 @@ namespace qs {
     enum class SwitchState { Idle, Quitting, Loading };
     SwitchState g_state = SwitchState::Idle;
     Ref<GJGameLevel> g_pending;
+    CCScene* g_oldScene = nullptr; // chỉ dùng để so sánh con trỏ, không giữ tham chiếu
 }
 
 // Nằm trong màn loading: chờ game thoát hẳn level cũ rồi mới dựng level mới.
@@ -291,10 +292,21 @@ namespace qs {
         return nullptr;
     }
 
-    // Nếu game không thoát level (ví dụ đang hiện hộp xác nhận thoát) thì huỷ sau ~10 giây.
+    // Mỗi frame kiểm tra xem game đã bắt đầu rời level chưa. Khi game bắt đầu chuyển sang scene
+    // khác (màn sảnh...), thay luôn điểm đến bằng màn loading. Cách này không phụ thuộc game dùng
+    // hàm chuyển scene nào. Nếu game không thoát level (ví dụ đang hiện hộp xác nhận thoát) thì
+    // huỷ sau ~10 giây.
     void pollQuit(int frames) {
         Loader::get()->queueInMainThread([frames]() {
             if (g_state != SwitchState::Quitting) return;
+
+            auto director = CCDirector::get();
+            if (g_pending && director->getRunningScene() != g_oldScene) {
+                g_state = SwitchState::Loading;
+                director->replaceScene(makeLoadingScene(g_pending));
+                return;
+            }
+
             if (frames > 600) {
                 g_state = SwitchState::Idle;
                 g_pending = nullptr;
@@ -310,6 +322,7 @@ namespace qs {
         if (!pause && !playLayer) return;
 
         g_pending = level;
+        g_oldScene = CCDirector::get()->getRunningScene();
         g_state = SwitchState::Quitting;
 
         // Thoát level bằng đúng đường thoát của game để mọi mod khác dọn dẹp bình thường.
