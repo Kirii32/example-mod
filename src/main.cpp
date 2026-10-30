@@ -37,7 +37,8 @@ namespace qs {
         int id = level->m_levelID.value();
         if (id <= 0) return t;
         t.id = id;
-        t.type = (level->m_levelType == GJLevelType::Local) ? 'm' : 'o';
+        // Kiểu level của game: 1 = level chính thức của RobTop, 2 = level tự tạo, 3 = level online đã lưu
+        t.type = (static_cast<int>(level->m_levelType) == 1) ? 'm' : 'o';
         t.name = std::string(level->m_levelName);
         return t;
     }
